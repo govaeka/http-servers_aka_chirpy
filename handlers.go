@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/govaeka/http-servers_aka_chirpy.git/internal/database"
 
 	_ "github.com/lib/pq"
 )
@@ -19,38 +20,10 @@ func endpointHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-func (cfg *apiConfig) chirpValidationHandler(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
-		Body string `json:"body"`
-	}
-
-	type validationMsg struct {
-		Valid       bool   `json:"valid"`
-		CleanedBody string `json:"cleaned_body"`
-	}
-
-	decoder := json.NewDecoder(r.Body)
-	params := parameters{}
-	err := decoder.Decode(&params)
-	if err != nil {
-		log.Printf("Error decoding parameters: %s", err)
-		respondWithError(w, 500, "Something went wrong")
-		return
-	}
-	if len(params.Body) > 140 {
-		respondWithError(w, 400, "Chirp is too long")
-		return
-	}
-
-	newResponse := validationMsg{}
-	newResponse.CleanedBody = profanityBleeped(params.Body)
-	newResponse.Valid = true
-	respondWithJSON(w, 200, newResponse)
-}
-
 func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -64,7 +37,8 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 	mail := params.Email
 	dbUser, err := cfg.database.CreateUser(ctx, mail)
 	if err != nil {
-		http.Error(w, "Could not create user", http.StatusInternalServerError)
+		log.Printf("CreateUser failed: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Could not create user")
 		return
 	}
 
@@ -83,6 +57,140 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	respondWithJSON(w, http.StatusCreated, user)
+}
+
+func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request) {
+
+	/// DECODE /////
+	type parameters struct {
+		Body   string        `json:"body"`
+		UserID uuid.NullUUID `json:"user_id"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		log.Printf("Error decoding parameters: %s", err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+	if len(params.Body) > 140 {
+		respondWithError(w, 400, "Chirp is too long")
+		return
+	}
+	fmt.Printf("decoded params: %v", params)
+
+	/// VALIDATE / CLEAN ///////
+	type validationMsg struct {
+		Valid       bool   `json:"valid"`
+		CleanedBody string `json:"cleaned_body"`
+	}
+
+	cleanResponse := validationMsg{}
+	cleanResponse.CleanedBody = profanityBleeped(params.Body)
+	cleanResponse.Valid = true
+
+	/// CREATE CHIRP FOR DATABASE ///////
+	ctx := r.Context()
+	var newChirp database.CreateChirpParams
+	newChirp.Body = cleanResponse.CleanedBody
+	newChirp.UserID = params.UserID
+
+	finalResponse, err := cfg.database.CreateChirp(ctx, newChirp)
+
+	/// RESPOND WITHOUT JSON /////////
+	if err != nil {
+		respondWithError(w, 500, "Error saving Chirp to database.")
+		return
+	}
+
+	/// BUILD JSON RESPONSE STRUCT ///////
+
+	type fullChirp struct {
+		ID        uuid.UUID     `json:"id"`
+		CreatedAt time.Time     `json:"created_at"`
+		UpdatedAt time.Time     `json:"updated_at"`
+		Body      string        `json:"body"`
+		UserID    uuid.NullUUID `json:"user_id"`
+	}
+	JSONChirp := fullChirp{
+		ID:        finalResponse.ID,
+		CreatedAt: finalResponse.CreatedAt,
+		UpdatedAt: finalResponse.UpdatedAt,
+		Body:      finalResponse.Body,
+		UserID:    finalResponse.UserID,
+	}
+
+	respondWithJSON(w, http.StatusCreated, JSONChirp)
+
+}
+
+func (cfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request) {
+	idString := r.PathValue("chirpID")
+	id, err := uuid.Parse(idString)
+	if err != nil {
+		http.Error(w, "error parsing chirp ID", http.StatusBadRequest)
+		return
+	}
+
+	type fullChirp struct {
+		ID        uuid.UUID     `json:"id"`
+		CreatedAt time.Time     `json:"created_at"`
+		UpdatedAt time.Time     `json:"updated_at"`
+		Body      string        `json:"body"`
+		UserID    uuid.NullUUID `json:"user_id"`
+	}
+	ctx := r.Context()
+	DbData, err := cfg.database.GetChirp(ctx, id)
+	if DbData.ID == uuid.Nil {
+		respondWithError(w, 404, "Chirp-ID not found.")
+	}
+	if err != nil {
+		fmt.Printf("Error text: %v", err)
+		respondWithError(w, 500, "Error retrieving data from DB")
+	}
+
+	var fullData fullChirp
+	fullData = fullChirp{
+		ID:        DbData.ID,
+		CreatedAt: DbData.CreatedAt,
+		UpdatedAt: DbData.UpdatedAt,
+		Body:      DbData.Body,
+		UserID:    DbData.UserID,
+	}
+
+	respondWithJSON(w, 200, fullData)
+}
+
+func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	type fullChirp struct {
+		ID        uuid.UUID     `json:"id"`
+		CreatedAt time.Time     `json:"created_at"`
+		UpdatedAt time.Time     `json:"updated_at"`
+		Body      string        `json:"body"`
+		UserID    uuid.NullUUID `json:"user_id"`
+	}
+	ctx := r.Context()
+	DbData, err := cfg.database.GetChirps(ctx)
+	if err != nil {
+		respondWithError(w, 500, "Error retrieving data from DB")
+		return
+	}
+
+	var results []fullChirp
+	var newC fullChirp
+
+	for i := range DbData {
+		newC.ID = DbData[i].ID
+		newC.CreatedAt = DbData[i].CreatedAt
+		newC.UpdatedAt = DbData[i].UpdatedAt
+		newC.Body = DbData[i].Body
+		newC.UserID = DbData[i].UserID
+		results = append(results, newC)
+	}
+
+	respondWithJSON(w, 200, results)
 }
 
 func (cfg *apiConfig) hitcountReportingHandler(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +249,10 @@ func respondWithError(w http.ResponseWriter, code int, msg string) {
 
 func respondWithJSON(w http.ResponseWriter, code int, payload any) {
 
-	data, _ := json.Marshal(payload)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Printf("Problem converting to JSON: %v", err)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	w.Write(data)

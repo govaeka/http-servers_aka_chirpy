@@ -50,10 +50,12 @@ func main() {
 	}
 
 	mux.HandleFunc("GET /admin/metrics", cfg.hitcountReportingHandler)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirpHandler)
+	mux.HandleFunc("GET /api/chirps", cfg.getChirpsHandler)
 	mux.HandleFunc("GET /api/healthz", endpointHandler)
 	mux.HandleFunc("POST /admin/reset", cfg.hitcountResetHandler)
+	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
 	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
-	mux.HandleFunc("POST /api/validate_chirp", cfg.chirpValidationHandler)
 
 	chirpServer.ListenAndServe()
 }
