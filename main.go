@@ -15,6 +15,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	database       *database.Queries
+	secret         string
 }
 
 func main() {
@@ -33,6 +34,7 @@ func main() {
 	cfg := apiConfig{
 		fileserverHits: atomic.Int32{},
 		database:       dbQueries,
+		secret:         os.Getenv("JWTSecret"),
 	}
 
 	mux := http.NewServeMux()
@@ -55,6 +57,7 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", endpointHandler)
 	mux.HandleFunc("POST /admin/reset", cfg.hitcountResetHandler)
 	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
+	mux.HandleFunc("POST /api/login", cfg.loginHandler)
 	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
 
 	chirpServer.ListenAndServe()

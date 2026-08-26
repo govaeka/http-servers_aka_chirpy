@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/govaeka/http-servers_aka_chirpy.git/internal/auth"
 	"github.com/govaeka/http-servers_aka_chirpy.git/internal/database"
 
 	_ "github.com/lib/pq"
@@ -33,9 +35,16 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	hashPw, err := auth.HashPassword(params.Password)
+	if err != nil {
+		log.Printf("Password hashing failed")
+	}
+
+	var userParams database.CreateUserParams
+	userParams.Email = params.Email
+	userParams.HashedPassword = hashPw
 	ctx := r.Context()
-	mail := params.Email
-	dbUser, err := cfg.database.CreateUser(ctx, mail)
+	dbUser, err := cfg.database.CreateUser(ctx, userParams)
 	if err != nil {
 		log.Printf("CreateUser failed: %v", err)
 		respondWithError(w, http.StatusInternalServerError, "Could not create user")
@@ -75,13 +84,27 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, 500, "Something went wrong")
 		return
 	}
+
+	//// CHECK TOKEN
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		fmt.Printf("could not get token: %v", err)
+		return
+	}
+	IdForUser, err := auth.ValidateJWT(tokenString, os.Getenv("JWTSecret"))
+	if err != nil {
+		fmt.Printf("validity check failed: %v", err)
+		respondWithError(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+
+	/// VALIDATE / CLEAN ///////
 	if len(params.Body) > 140 {
 		respondWithError(w, 400, "Chirp is too long")
 		return
 	}
 	fmt.Printf("decoded params: %v", params)
 
-	/// VALIDATE / CLEAN ///////
 	type validationMsg struct {
 		Valid       bool   `json:"valid"`
 		CleanedBody string `json:"cleaned_body"`
@@ -95,7 +118,10 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 	ctx := r.Context()
 	var newChirp database.CreateChirpParams
 	newChirp.Body = cleanResponse.CleanedBody
-	newChirp.UserID = params.UserID
+	newChirp.UserID = uuid.NullUUID{
+		UUID:  IdForUser,
+		Valid: true,
+	}
 
 	finalResponse, err := cfg.database.CreateChirp(ctx, newChirp)
 
@@ -204,6 +230,66 @@ func (cfg *apiConfig) hitcountResetHandler(w http.ResponseWriter, r *http.Reques
 	cfg.fileserverHits.Store(0)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(200)
+}
+
+func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	type params struct {
+		Password         string `json:"password"`
+		Email            string `json:"email"`
+		ExpiresInSeconds int    `json:"expires_in_seconds"`
+	}
+	var creds params
+	err := decoder.Decode(&creds)
+	if err != nil {
+		log.Printf("Error decoding credentials: %v", err)
+		return
+	}
+
+	ctx := r.Context()
+	usr, err := cfg.database.GetUser(ctx, creds.Email)
+	if err != nil {
+		log.Printf("Error retrieving user from DB.")
+		respondWithError(w, 401, "Incorrect email or password.")
+		return
+	}
+
+	match, err := auth.CheckPasswordHash(creds.Password, usr.HashedPassword)
+	if err != nil {
+		log.Printf("Error comparing password to hash.")
+		respondWithError(w, 401, "Incorrect email or password.")
+		return
+	}
+
+	if match == false {
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+
+	if creds.ExpiresInSeconds == 0 || creds.ExpiresInSeconds > 3600 {
+		creds.ExpiresInSeconds = 3600
+	}
+
+	token, err := auth.MakeJWT(usr.ID, cfg.secret, time.Duration(creds.ExpiresInSeconds)*time.Second)
+	if err != nil {
+		log.Printf("error creating token: %v", err)
+	}
+	var newBody struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+		Token     string    `json:"token"`
+	}
+
+	newBody.ID = usr.ID
+	newBody.CreatedAt = usr.CreatedAt
+	newBody.UpdatedAt = usr.UpdatedAt
+	newBody.Email = usr.Email
+	newBody.Token = token
+
+	respondWithJSON(w, 200, newBody)
+
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
