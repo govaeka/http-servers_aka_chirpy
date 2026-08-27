@@ -58,7 +58,10 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", cfg.hitcountResetHandler)
 	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
 	mux.HandleFunc("POST /api/login", cfg.loginHandler)
+	mux.HandleFunc("POST /api/refresh", cfg.refreshHandler)
+	mux.HandleFunc("POST /api/revoke", cfg.revokeHandler)
 	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
+	mux.HandleFunc("PUT /api/users", cfg.updateUserHandler)
 
 	chirpServer.ListenAndServe()
 }

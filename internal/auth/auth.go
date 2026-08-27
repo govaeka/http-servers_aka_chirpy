@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -40,7 +42,7 @@ func HashPassword(password string) (string, error) {
 	return hash, nil
 }
 
-func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (string, error) {
+func MakeJWT(userID uuid.UUID, tokenSecret string) (string, error) {
 
 	id := userID.String()
 	method := jwt.SigningMethodHS256
@@ -48,7 +50,7 @@ func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (str
 	claims := jwt.RegisteredClaims{
 		Issuer:    "chirpy-access",
 		IssuedAt:  jwt.NewNumericDate(nowUTC),
-		ExpiresAt: jwt.NewNumericDate(nowUTC.Add(expiresIn)),
+		ExpiresAt: jwt.NewNumericDate(nowUTC.Add(time.Duration(1 * time.Hour))),
 		Subject:   id,
 	}
 	newToken := jwt.NewWithClaims(method, claims)
@@ -59,6 +61,18 @@ func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (str
 	}
 
 	return signedString, nil
+}
+
+func MakeRefreshToken() (string, error) {
+	randData := make([]byte, 32)
+	_, err := rand.Read(randData)
+	if err != nil {
+		fmt.Printf("create random data failed: %v", err)
+		return "", err
+	}
+	token := hex.EncodeToString(randData)
+
+	return token, nil
 }
 
 func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
