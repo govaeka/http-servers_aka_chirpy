@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -53,17 +54,19 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	type User struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
+		ID          uuid.UUID `json:"id"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Email       string    `json:"email"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
 	}
 
 	user := User{
-		ID:        dbUser.ID,
-		CreatedAt: dbUser.CreatedAt,
-		UpdatedAt: dbUser.UpdatedAt,
-		Email:     dbUser.Email,
+		ID:          dbUser.ID,
+		CreatedAt:   dbUser.CreatedAt,
+		UpdatedAt:   dbUser.UpdatedAt,
+		Email:       dbUser.Email,
+		IsChirpyRed: dbUser.IsChirpyRed,
 	}
 
 	respondWithJSON(w, http.StatusCreated, user)
@@ -153,6 +156,51 @@ func (cfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request)
 
 }
 
+func (cfg *apiConfig) deleteChirpHandler(w http.ResponseWriter, r *http.Request) {
+	// CHECK ACCESS TOKEN
+	tokStr, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized")
+		log.Printf("ERROR\nerror getting bearer token: Unauthenticated request: %v\n", err)
+		return
+	}
+	sessionUserId, err := auth.ValidateJWT(tokStr, os.Getenv("JWTSecret"))
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "unauthorized")
+		log.Printf("error validating token: %v\n", err)
+		return
+	}
+
+	// GET CHIRP ID FROM URL PATH
+	pathChirp := r.PathValue("chirpID")
+	chirpUrlId, err := uuid.Parse(pathChirp)
+
+	// Get chirp author ID
+	ctx := r.Context()
+	chirp, err := cfg.database.GetChirp(ctx, chirpUrlId)
+	if err != nil {
+		respondWithError(w, 404, "chirp not found")
+		log.Printf("error getting chirp from DB: ID not found: %v\n", err)
+		return
+	}
+	// Compare chirp author ID to User ID in request token
+	if chirp.UserID.UUID != sessionUserId {
+		respondWithError(w, 403, "chirp cannot be deleted")
+		log.Printf("user is not the author of the chirp: %v\n", err)
+		return
+	}
+
+	_, err = cfg.database.DeleteChirp(ctx, chirp.ID)
+	if err != nil {
+		respondWithError(w, 500, "something went wrong")
+		log.Printf("ERROR\nerror deleting chirp: %v\n", err)
+		return
+	}
+
+	respondWithJSON(w, 204, "Chirp deleted successfully.")
+
+}
+
 func (cfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request) {
 	idString := r.PathValue("chirpID")
 	id, err := uuid.Parse(idString)
@@ -198,11 +246,28 @@ func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
 		Body      string        `json:"body"`
 		UserID    uuid.NullUUID `json:"user_id"`
 	}
+	authorId := r.URL.Query().Get("author_id")
+	// s is a string that contains the value of the author_id query parameter
+	// if it exists, or an empty string if it doesn't
 	ctx := r.Context()
-	DbData, err := cfg.database.GetChirps(ctx)
-	if err != nil {
-		respondWithError(w, 500, "Error retrieving data from DB")
-		return
+	var DbData []database.Chirp
+	if authorId != "" {
+		userAuthor, err := uuid.Parse(authorId)
+		var newId uuid.NullUUID
+		newId.UUID = userAuthor
+		newId.Valid = true
+		DbData, err = cfg.database.GetUserChirps(ctx, newId)
+		if err != nil {
+			respondWithError(w, 500, "Error retrieving data from DB")
+			return
+		}
+	} else {
+		var err error
+		DbData, err = cfg.database.GetChirps(ctx)
+		if err != nil {
+			respondWithError(w, 500, "Error retrieving data from DB")
+			return
+		}
 	}
 
 	var results []fullChirp
@@ -215,6 +280,22 @@ func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
 		newC.Body = DbData[i].Body
 		newC.UserID = DbData[i].UserID
 		results = append(results, newC)
+	}
+
+	sortOrder := r.URL.Query().Get("sort")
+
+	if sortOrder != "" {
+		if sortOrder == "desc" {
+			sort.Slice(
+				results, func(i, j int) bool {
+					return results[i].CreatedAt.After(results[j].CreatedAt)
+				})
+		} else {
+			sort.Slice(
+				results, func(i, j int) bool {
+					return results[i].CreatedAt.Before(results[j].CreatedAt)
+				})
+		}
 	}
 
 	respondWithJSON(w, 200, results)
@@ -297,6 +378,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		Email        string    `json:"email"`
 		Token        string    `json:"token"`
 		RefreshToken string    `json:"refresh_token"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 	}
 
 	newBody.ID = usr.ID
@@ -305,6 +387,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 	newBody.Email = usr.Email
 	newBody.Token = token
 	newBody.RefreshToken = refrToken.Token
+	newBody.IsChirpyRed = usr.IsChirpyRed
 
 	respondWithJSON(w, 200, newBody)
 }
@@ -385,14 +468,14 @@ func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) updateUserHandler(w http.ResponseWriter, r *http.Request) {
 	accToken, err := auth.GetBearerToken(r.Header)
 	if err != nil {
-		respondWithError(w, 401, "no access token in header")
-		log.Printf("no access token in header: %v", err)
+		respondWithError(w, 401, "unauthorized")
+		log.Printf("no access token in header: %v\n", err)
 		return
 	}
-	_, err = auth.ValidateJWT(accToken, os.Getenv("JWTSecret"))
+	userId, err := auth.ValidateJWT(accToken, os.Getenv("JWTSecret"))
 	if err != nil {
-		respondWithError(w, 401, "no valid access token")
-		log.Printf("no valid access token: %v", err)
+		respondWithError(w, 401, "unauthorized")
+		log.Printf("no valid access token: %v\n", err)
 		return
 	}
 
@@ -404,18 +487,102 @@ func (cfg *apiConfig) updateUserHandler(w http.ResponseWriter, r *http.Request) 
 	var jData params
 	err = decoder.Decode(&jData)
 	if err != nil {
-		respondWithError(w, 401, "could not decode email or password")
-		log.Printf("could not decode email or password: %v", err)
+		respondWithError(w, 500, "something went wrong")
+		log.Printf("could not decode email or password: %v\n", err)
 		return
 	}
 
 	hPw, err := auth.HashPassword(jData.Password)
 	if err != nil {
-		log.Printf("error hashing password: %v", err)
-		respondWithError(w, 401, "an error occured, please try again")
+		log.Printf("error hashing password: %v\n", err)
+		respondWithError(w, 500, "something went wrong")
+		return
+	}
+	ctx := r.Context()
+
+	creds := database.UpdateUserParams{
+		Email:          jData.Email,
+		HashedPassword: hPw,
+		ID:             userId,
+	}
+
+	usr, err := cfg.database.UpdateUser(ctx, creds)
+	if err != nil {
+		log.Printf("error saving user: %v\n", err)
+		respondWithError(w, 500, "something went wrong")
 		return
 	}
 
+	// create a "response model" or DTO: Data Transfer Object
+	type UserResponse struct {
+		ID          uuid.UUID `json:"id"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Email       string    `json:"email"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
+	}
+
+	usrResp := UserResponse{
+		ID:          usr.ID,
+		CreatedAt:   usr.CreatedAt,
+		UpdatedAt:   usr.UpdatedAt,
+		Email:       usr.Email,
+		IsChirpyRed: usr.IsChirpyRed,
+	}
+
+	respondWithJSON(w, 200, usrResp)
+
+}
+
+func (cfg *apiConfig) upgradePlanUserHandler(w http.ResponseWriter, r *http.Request) {
+	headerAPIKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "unauthorized")
+		log.Printf("no API key in header: %v\n", err)
+		return
+	}
+
+	if headerAPIKey != os.Getenv("POLKA_KEY") {
+		respondWithError(w, 401, "unauthorized")
+		log.Printf("API key in .env and header don't match: %v\n", err)
+		return
+	}
+
+	type dataParams struct {
+		UserId string `json:"user_id"`
+	}
+	type params struct {
+		Event string     `json:"event"`
+		Data  dataParams `json:"data"`
+	}
+	var decBody params
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&decBody)
+	if err != nil {
+		log.Printf("error decoding request body: %v", err)
+		respondWithError(w, 500, "something went wrong")
+		return
+	}
+	if decBody.Event != "user.upgraded" {
+		log.Printf("event is not user.upgraded")
+		respondWithError(w, 204, "denied")
+		return
+	}
+	ctx := r.Context()
+	idStr := decBody.Data.UserId
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		log.Printf("error parsing user_id: %v", err)
+		respondWithError(w, 500, "something went wrong")
+		return
+	}
+	_, err = cfg.database.UpgradePlanUser(ctx, id)
+	if err != nil {
+		log.Printf("user not found: %v", err)
+		respondWithError(w, http.StatusNotFound, "not found")
+	}
+
+	respondWithJSON(w, 204, "")
 }
 
 // Helpers //////////////////////////////

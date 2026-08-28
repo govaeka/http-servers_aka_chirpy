@@ -21,9 +21,20 @@ func CheckPasswordHash(password string, hash string) (bool, error) {
 	return match, nil
 }
 
+func GetAPIKey(headers http.Header) (string, error) {
+	authHeaderValue := headers.Get("Authorization")
+	if authHeaderValue == "" {
+		return " ", fmt.Errorf("header doesn't exist")
+	}
+	splitAuthHeader := strings.Split(authHeaderValue, " ")
+
+	APIKey := splitAuthHeader[1]
+	return APIKey, nil
+
+}
+
 func GetBearerToken(headers http.Header) (string, error) {
 	authHeaderValue := headers.Get("Authorization")
-	fmt.Printf("authHeader = %v", authHeaderValue)
 	if authHeaderValue == "" {
 		return " ", fmt.Errorf("header doesn't exist")
 	}

@@ -16,6 +16,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	database       *database.Queries
 	secret         string
+	APIKey         string
 }
 
 func main() {
@@ -35,6 +36,7 @@ func main() {
 		fileserverHits: atomic.Int32{},
 		database:       dbQueries,
 		secret:         os.Getenv("JWTSecret"),
+		APIKey:         os.Getenv("API_KEY"),
 	}
 
 	mux := http.NewServeMux()
@@ -51,6 +53,7 @@ func main() {
 		Handler: mux,
 	}
 
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", cfg.deleteChirpHandler)
 	mux.HandleFunc("GET /admin/metrics", cfg.hitcountReportingHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirpHandler)
 	mux.HandleFunc("GET /api/chirps", cfg.getChirpsHandler)
@@ -58,6 +61,7 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", cfg.hitcountResetHandler)
 	mux.HandleFunc("POST /api/chirps", cfg.createChirpHandler)
 	mux.HandleFunc("POST /api/login", cfg.loginHandler)
+	mux.HandleFunc("POST /api/polka/webhooks", cfg.upgradePlanUserHandler)
 	mux.HandleFunc("POST /api/refresh", cfg.refreshHandler)
 	mux.HandleFunc("POST /api/revoke", cfg.revokeHandler)
 	mux.HandleFunc("POST /api/users", cfg.createUserHandler)
